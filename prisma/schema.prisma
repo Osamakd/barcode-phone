@@ -1,0 +1,458 @@
+// Barcode Phone - Mobile Accessories Store Database Schema
+// نظام متكامل لمتجر إكسسوارات الجوال - نقطة البيع والمحاسبة
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// User roles: RETAIL (default), WHOLESALE (requires approval), ADMIN, CASHIER
+enum UserRole {
+  RETAIL
+  WHOLESALE
+  ADMIN
+  CASHIER    // موظف كاشير - صلاحيات محدودة
+}
+
+// Wholesale request status
+enum WholesaleRequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+// Invoice status for wholesale orders
+enum InvoiceStatus {
+  DRAFT        // فاتورة مبدئية
+  PREPARING    // قيد التجهيز
+  CONTACTED    // تم التواصل
+  COMPLETED    // مكتملة
+  CANCELLED    // ملغاة
+}
+
+// Payment methods
+enum PaymentMethod {
+  CASH         // نقدي
+  CREDIT       // آجل
+  SYRIEL       // سيريتيل
+  MOBILE_MONEY // محفظة إلكترونية
+}
+
+// POS Terminal status
+enum TerminalStatus {
+  ACTIVE
+  INACTIVE
+  MAINTENANCE
+}
+
+// Product category
+model Category {
+  id          String     @id @default(cuid())
+  nameAr      String
+  nameEn      String
+  slug        String     @unique
+  description String?
+  image       String?
+  color       String?    @default("#f97316") // لون التصنيف
+  icon        String?    // أيقونة التصنيف
+  isActive    Boolean    @default(true)
+  sortOrder   Int        @default(0)
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+  products    Product[]
+  
+  @@map("categories")
+}
+
+// Product with retail and wholesale pricing (USD base)
+model Product {
+  id             String      @id @default(cuid())
+  nameAr         String
+  nameEn         String
+  slug           String      @unique
+  description    String?
+  image          String?
+  
+  // Pricing
+  retailPrice    Float       // سعر التجزئة
+  wholesalePrice Float       // سعر الجملة
+  costPrice      Float       @default(0) // سعر التكلفة
+  
+  // Inventory
+  stock          Int         @default(0)
+  minStock       Int         @default(5)
+  maxStock       Int         @default(100)
+  
+  // Product codes
+  sku            String?     @unique
+  barcode        String?     @unique
+  
+  // Status
+  isActive       Boolean     @default(true)
+  isFeatured     Boolean     @default(false)
+  
+  // Category
+  categoryId     String
+  category       Category    @relation(fields: [categoryId], references: [id])
+  
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+  
+  invoiceItems   InvoiceItem[]
+  stockMovements StockMovement[]
+  saleItems      SaleItem[]
+  
+  @@index([barcode])
+  @@index([sku])
+  @@map("products")
+}
+
+// User with role-based access
+model User {
+  id                String              @id @default(cuid())
+  email             String              @unique
+  password          String
+  name              String?
+  phone             String?
+  whatsappNumber    String?
+  role              UserRole            @default(RETAIL)
+  isActive          Boolean             @default(true)
+  emailVerified     DateTime?
+  
+  // Address and Location
+  address           String?
+  city              String?
+  region            String?
+  latitude          Float?
+  longitude         Float?
+  locationNotes     String?
+  
+  // Employee info (for cashiers/staff)
+  employeeId        String?             @unique // رقم الموظف
+  hireDate          DateTime?
+  salary            Float?
+  
+  // Permissions
+  canApplyDiscount  Boolean             @default(false)
+  canVoidSales      Boolean             @default(false)
+  maxDiscountPercent Float?
+  
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
+  wholesaleRequest  WholesaleRequest?
+  invoices          Invoice[]
+  notifications     Notification[]
+  sales             Sale[]
+  shifts            Shift[]
+  currentTerminal   Terminal?           @relation("TerminalUser")
+  
+  @@map("users")
+}
+
+// Wholesale access request
+model WholesaleRequest {
+  id              String                @id @default(cuid())
+  userId          String                @unique
+  user            User                  @relation(fields: [userId], references: [id])
+  fullName        String
+  idNumber        String
+  businessName    String?
+  phone           String?
+  whatsappNumber  String?
+  status          WholesaleRequestStatus @default(PENDING)
+  adminNotes      String?
+  reviewedAt      DateTime?
+  reviewedBy      String?
+  createdAt       DateTime              @default(now())
+  updatedAt       DateTime              @updatedAt
+  
+  @@map("wholesale_requests")
+}
+
+// POS Terminal - جهاز نقطة البيع
+model Terminal {
+  id              String        @id @default(cuid())
+  name            String        // اسم الجهاز
+  terminalCode    String        @unique // كود الجهاز
+  location        String?       // الموقع (المخزن، الفرع)
+  status          TerminalStatus @default(ACTIVE)
+  
+  // Hardware info
+  barcodeScanner  Boolean       @default(false) // قارئ باركود
+  receiptPrinter  Boolean       @default(false) // طابعة فواتير
+  cashDrawer      Boolean       @default(false) // درج النقدية
+  
+  // Session
+  currentUserId   String?       @unique
+  currentUser     User?         @relation("TerminalUser", fields: [currentUserId], references: [id])
+  lastActivity    DateTime?
+  
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  sales           Sale[]
+  shifts          Shift[]
+  
+  @@map("terminals")
+}
+
+// Shift - وردية العمل
+model Shift {
+  id              String    @id @default(cuid())
+  terminalId      String
+  terminal        Terminal  @relation(fields: [terminalId], references: [id])
+  userId          String
+  user            User      @relation(fields: [userId], references: [id])
+  
+  openingCash     Float     @default(0) // النقدية الافتتاحية
+  closingCash     Float?    // النقدية الإغلاقية
+  expectedCash    Float?    // النقدية المتوقعة
+  
+  openedAt        DateTime  @default(now())
+  closedAt        DateTime?
+  notes           String?
+  
+  sales           Sale[]
+  
+  @@map("shifts")
+}
+
+// Invoice for wholesale orders
+model Invoice {
+  id              String        @id @default(cuid())
+  invoiceNumber   String        @unique
+  userId          String?
+  user            User?         @relation(fields: [userId], references: [id])
+  customerName    String
+  customerId      String?
+  customerPhone   String?
+  whatsappNumber  String?
+  customerAddress String?
+  customerCity    String?
+  notes           String?
+  subtotal        Float
+  tax             Float         @default(0)
+  discount        Float         @default(0) // الخصم
+  total           Float
+  totalSYP        Float?
+  exchangeRate    Float?
+  status          InvoiceStatus @default(DRAFT)
+  stockDeducted   Boolean       @default(false)
+  isWalkIn        Boolean       @default(false)
+  adminNotes      String?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  items           InvoiceItem[]
+  stockMovements  StockMovement[]
+  
+  @@map("invoices")
+}
+
+// Invoice line items
+model InvoiceItem {
+  id          String    @id @default(cuid())
+  invoiceId   String
+  invoice     Invoice   @relation(fields: [invoiceId], references: [id])
+  productId   String
+  product     Product   @relation(fields: [productId], references: [id])
+  productName String
+  quantity    Int
+  unitPrice   Float
+  discount    Float     @default(0)
+  totalPrice  Float
+  
+  @@map("invoice_items")
+}
+
+// Sale - نقطة البيع السريعة (للمفرق)
+model Sale {
+  id              String        @id @default(cuid())
+  receiptNumber   String        @unique // رقم الإيصال
+  
+  // Terminal & User
+  terminalId      String?
+  terminal        Terminal?     @relation(fields: [terminalId], references: [id])
+  shiftId         String?
+  shift           Shift?        @relation(fields: [shiftId], references: [id])
+  userId          String
+  user            User          @relation(fields: [userId], references: [id])
+  
+  // Customer (optional for walk-in)
+  customerId      String?
+  customerName    String?
+  customerPhone   String?
+  
+  // Pricing
+  subtotal        Float
+  discount        Float         @default(0)
+  discountReason  String?       // سبب الخصم
+  tax             Float         @default(0)
+  total           Float
+  totalSYP        Float?
+  exchangeRate    Float?
+  
+  // Payment
+  paymentMethod   PaymentMethod @default(CASH)
+  amountPaid      Float         // المبلغ المدفوع
+  change          Float         @default(0) // الباقي
+  
+  // Status
+  isVoided        Boolean       @default(false) // ملغاة
+  voidedBy        String?
+  voidedAt        DateTime?
+  voidReason      String?
+  
+  notes           String?
+  createdAt       DateTime      @default(now())
+  
+  items           SaleItem[]
+  stockMovements  StockMovement[]
+  
+  @@map("sales")
+}
+
+// Sale line items
+model SaleItem {
+  id          String    @id @default(cuid())
+  saleId      String
+  sale        Sale      @relation(fields: [saleId], references: [id])
+  productId   String
+  product     Product   @relation(fields: [productId], references: [id])
+  productName String
+  quantity    Int
+  unitPrice   Float
+  discount    Float     @default(0)
+  totalPrice  Float
+  barcode     String?   // الباركود الممسوح
+  
+  @@map("sale_items")
+}
+
+// System settings
+model Settings {
+  id              String   @id @default(cuid())
+  key             String   @unique
+  value           String
+  description     String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  @@map("settings")
+}
+
+// Session for authentication
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  createdAt    DateTime @default(now())
+  
+  @@map("sessions")
+}
+
+// Password reset tokens
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+  createdAt  DateTime @default(now())
+  
+  @@unique([identifier, token])
+  @@map("verification_tokens")
+}
+
+// Stock movement for inventory tracking
+model StockMovement {
+  id            String            @id @default(cuid())
+  productId     String
+  product       Product           @relation(fields: [productId], references: [id])
+  quantity      Int
+  type          StockMovementType
+  reason        String?
+  
+  // Reference
+  invoiceId     String?
+  invoice       Invoice?          @relation(fields: [invoiceId], references: [id])
+  saleId        String?
+  sale          Sale?             @relation(fields: [saleId], references: [id])
+  
+  previousStock Int
+  newStock      Int
+  unitCost      Float?            // تكلفة الوحدة
+  totalCost     Float?            // التكلفة الإجمالية
+  
+  createdBy     String?
+  createdAt     DateTime          @default(now())
+  
+  @@map("stock_movements")
+}
+
+// Stock movement types
+enum StockMovementType {
+  PURCHASE      // شراء
+  SALE          // بيع
+  POS_SALE      // بيع نقطة البيع
+  ADJUSTMENT    // تعديل
+  RETURN        // إرجاع
+  DAMAGE        // تلف
+  TRANSFER      // نقل
+  INVENTORY     // جرد
+}
+
+// Notification
+model Notification {
+  id          String           @id @default(cuid())
+  userId      String
+  user        User             @relation(fields: [userId], references: [id])
+  type        NotificationType
+  title       String
+  message     String
+  data        String?
+  isRead      Boolean          @default(false)
+  createdAt   DateTime         @default(now())
+  
+  @@map("notifications")
+}
+
+// Notification types
+enum NotificationType {
+  NEW_INVOICE
+  INVOICE_UPDATE
+  LOW_STOCK
+  NEW_USER
+  NEW_WHOLESALE
+  NEW_SALE
+  SHIFT_START
+  SHIFT_END
+  SYSTEM
+}
+
+// Daily Report - التقرير اليومي
+model DailyReport {
+  id              String    @id @default(cuid())
+  date            DateTime  @unique
+  
+  // Sales
+  totalSales      Int       @default(0)
+  totalRevenue    Float     @default(0)
+  totalRevenueSYP Float     @default(0)
+  
+  // Payment breakdown
+  cashSales       Float     @default(0)
+  creditSales     Float     @default(0)
+  
+  // Expenses
+  totalExpenses   Float     @default(0)
+  
+  // Inventory
+  stockPurchases  Float     @default(0)
+  stockValue      Float     @default(0)
+  
+  createdAt       DateTime  @default(now())
+  
+  @@map("daily_reports")
+}
